@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Particles WebGPU Compute + Canvas 2D</title>
+    <script type="importmap">
+      {
+        "imports": {
+          "stats.js": "https://esm.sh/stats.js",
+          "lil-gui": "https://esm.sh/lil-gui",
+          "simplex-noise": "https://esm.sh/simplex-noise"
+        }
+      }
+    </script>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background-color: #000;
+      }
+      canvas {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas-2d"></canvas>
+    <script type="module">
+      import Stats from "stats.js";
+      import { GUI } from "lil-gui";
+      import { createNoise2D } from "simplex-noise";
+
+      let stats;
+
+      // language=WGSL
+      const COMPUTE_SHADER = `
+            struct Particle {
+                pos: vec2<f32>,
+                vel: vec2<f32>,
+                rnd: f32,
+                _pad: f32,
+            };
+
+            struct Uniforms {
+                screen_dim: vec2<f32>,
+                mouse_pos: vec2<f32>,
+                force_map_dim: vec2<f32>,
+            };
+
+            @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
+            @group(0) @binding(1) var<uniform> uniforms: Uniforms;
+            @group(0) @binding(2) var<storage, read> force_map_x: array<f32>;
+            @group(0) @binding(3) var<storage, read> force_map_y: array<f32>;
+
+            const MOUSE_RADIUS = 300.0;
+            const MOUSE_STRENGTH = 3.0;
+
+            @compute @workgroup_size(64)
+            fn main(
+                @builtin(global_invocation_id) global_id: vec3<u32>,
+                @builtin(num_workgroups) num_workgroups: vec3<u32>
+            ) {
+                // Since we might dispatch in 2D, calculate a linear index.
+                let grid_dim_x = num_workgroups.x * 64u;
+                let index = global_id.y * grid_dim_x + global_id.x;
+
+                let num_particles = arrayLength(&particles);
+                if (index >= num_particles) {
+                    return;
+                }
+
+                var p = particles[index];
+
+                let force_map_x_int = i32(floor(p.pos.x / 4.0));
+                let force_map_y_int = i32(floor(p.pos.y / 4.0));
+                let force_map_width_int = i32(uniforms.force_map_dim.x);
+                let force_map_height_int = i32(uniforms.force_map_dim.y);
+
+                // Clamp the coordinates to be within the force map dimensions to prevent out-of-bounds access.
+                let clamped_x = clamp(force_map_x_int, 0, force_map_width_int - 1);
+                let clamped_y = clamp(force_map_y_int, 0, force_map_height_int - 1);
+
+                let force_index = u32(clamped_y * force_map_width_int + clamped_x);
+
+                let force = vec2<f32>(force_map_x[force_index], force_map_y[force_index]);
+
+                p.vel = p.vel * 0.99 + force * p.rnd;
+
+                let mouse_vec = p.pos - uniforms.mouse_pos;
+                let dist_sq = dot(mouse_vec, mouse_vec);
+
+                if (dist_sq < (MOUSE_RADIUS * MOUSE_RADIUS)) {
+                    let dist = sqrt(dist_sq);
+                    let repel_force = (1.0 - dist / MOUSE_RADIUS) * MOUSE_STRENGTH;
+                    p.vel = p.vel + normalize(mouse_vec) * repel_force;
+                }
+
+                p.pos = p.pos + p.vel;
+
+                // Wrap around screen
+                if (p.pos.x < 0.0) { p.pos.x = p.pos.x + uniforms.screen_dim.x; }
+                if (p.pos.x >= uniforms.screen_dim.x) { p.pos.x = p.pos.x - uniforms.screen_dim.x; }
+                if (p.pos.y < 0.0) { p.pos.y = p.pos.y + uniforms.screen_dim.y; }
+                if (p.pos.y >= uniforms.screen_dim.y) { p.pos.y = p.pos.y - uniforms.screen_dim.y; }
+
+                particles[index] = p;
+            }
+        `;
+
+      class ParticleSystemGpuComputeCanvas2d {
+        constructor(canvas, numParticles) {
+          this.canvas = canvas;
+          this.context = this.canvas.getContext("2d");
+          this.numParticles = numParticles;
+
+          this.devicePixelRatio = window.devicePixelRatio || 1;
+          this.width = 0;
+          this.height = 0;
+          this.forceMapWidth = 0;
+          this.forceMapHeight = 0;
+
+          this.noiseSeed = Math.random();
+          this.mouseX = 0;
+          this.mouseY = 0;
+          this.frameCount = 0;
+          this.smoothedMouseX = 0;
+          this.smoothedMouseY = 0;
+          this.noiseX = null;
+          this.noiseY = null;
+        }
+
+        async reset(newNumParticles) {
+          this.numParticles = newNumParticles;
+          this.createBuffers();
+          this.createComputePipeline();
+          this.changeForces();
+          this.frameCount = 0;
+        }
+
+        async init() {
+          if (!navigator.gpu) {
+            alert("WebGPU not supported on this browser.");
+            return;
+          }
+          const adapter = await navigator.gpu.requestAdapter();
+          if (!adapter) {
+            alert("No appropriate GPUAdapter found.");
+            return;
+          }
+          this.device = await adapter.requestDevice();
+
+          this.computeShaderModule = this.device.createShaderModule({
+            code: COMPUTE_SHADER,
+          });
+
+          this.setupEventListeners();
+          this.handleResize();
+          this.animate();
+        }
+
+        setupEventListeners() {
+          window.addEventListener("resize", () => this.handleResize());
+          this.canvas.addEventListener("click", () => this.changeForces());
+          this.canvas.addEventListener("mousemove", (event) => {
+            this.mouseX = event.clientX * this.devicePixelRatio;
+            this.mouseY = event.clientY * this.devicePixelRatio;
+          });
+        }
+
+        createComputePipeline() {
+          this.computeBindGroupLayout = this.device.createBindGroupLayout({
+            entries: [
+              {
+                binding: 0,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "storage" },
+              },
+              {
+                binding: 1,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "uniform" },
+              },
+              {
+                binding: 2,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "read-only-storage" },
+              },
+              {
+                binding: 3,
+                visibility: GPUShaderStage.COMPUTE,
+                buffer: { type: "read-only-storage" },
+              },
+            ],
+          });
+
+          this.computePipeline = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({
+              bindGroupLayouts: [this.computeBindGroupLayout],
+            }),
+            compute: {
+              module: this.computeShaderModule,
+              entryPoint: "main",
+            },
+          });
+
+          this.computeBindGroup = this.device.createBindGroup({
+            layout: this.computeBindGroupLayout,
+            entries: [
+              { binding: 0, resource: { buffer: this.particlesBuffer } },
+              { binding: 1, resource: { buffer: this.uniformsBuffer } },
+              { binding: 2, resource: { buffer: this.forceMapXBuffer } },
+              { binding: 3, resource: { buffer: this.forceMapYBuffer } },
+            ],
+          });
+        }
+
+        createBuffers() {
+          const floatsPerParticle = 6;
+          const particleDataSize = this.numParticles * floatsPerParticle * 4;
+
+          // Buffer to store particle data on the GPU
+          this.particlesBuffer = this.device.createBuffer({
+            size: particleDataSize,
+            usage:
+              GPUBufferUsage.STORAGE |
+              GPUBufferUsage.COPY_SRC |
+              GPUBufferUsage.COPY_DST,
+          });
+
+          // Buffer to read back particle data to the CPU
+          this.readbackBuffer = this.device.createBuffer({
+            size: particleDataSize,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+          });
+
+          const initialParticleData = new Float32Array(
+            this.numParticles * floatsPerParticle
+          );
+          for (let i = 0; i < this.numParticles; i++) {
+            const offset = i * floatsPerParticle;
+            initialParticleData[offset] = Math.random() * this.width;
+            initialParticleData[offset + 1] = Math.random() * this.height;
+            initialParticleData[offset + 4] =
+              (Math.random() * 0.2 + 0.9) * 0.003;
+          }
+          this.device.queue.writeBuffer(
+            this.particlesBuffer,
+            0,
+            initialParticleData
+          );
+
+          this.uniformsBuffer = this.device.createBuffer({
+            size: 6 * 4,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+          });
+
+          const forceMapSize = this.forceMapWidth * this.forceMapHeight;
+          this.forceMapXBuffer = this.device.createBuffer({
+            size: forceMapSize * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+          });
+          this.forceMapYBuffer = this.device.createBuffer({
+            size: forceMapSize * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+          });
+        }
+
+        handleResize() {
+          this.devicePixelRatio = window.devicePixelRatio || 1;
+          const cssWidth = window.innerWidth;
+          const cssHeight = window.innerHeight;
+
+          this.width = cssWidth * this.devicePixelRatio;
+          this.height = cssHeight * this.devicePixelRatio;
+          this.canvas.width = this.width;
+          this.canvas.height = this.height;
+          this.canvas.style.width = cssWidth + "px";
+          this.canvas.style.height = cssHeight + "px";
+
+          this.forceMapWidth = Math.floor(this.width / 4);
+          this.forceMapHeight = Math.floor(this.height / 4);
+
+          this.createBuffers();
+          this.createComputePipeline();
+          this.changeForces();
+        }
+
+        changeForces() {
+          this.noiseSeed = Math.random();
+          const createRandom = () => (this.noiseSeed += 0.0001);
+          this.noiseX = createNoise2D(createRandom);
+          this.noiseY = createNoise2D(createRandom);
+
+          const forceMapSize = this.forceMapWidth * this.forceMapHeight;
+          const forceX = new Float32Array(forceMapSize);
+          const forceY = new Float32Array(forceMapSize);
+
+          const visualPeriod = 2000;
+          const scale = 4 / (this.devicePixelRatio * visualPeriod);
+
+          for (let y = 0; y < this.forceMapHeight; y++) {
+            for (let x = 0; x < this.forceMapWidth; x++) {
+              const i = y * this.forceMapWidth + x;
+              forceX[i] = this.noiseX(x * scale, y * scale) * 128;
+              forceY[i] = this.noiseY(x * scale, y * scale) * 128;
+            }
+          }
+
+          this.device.queue.writeBuffer(this.forceMapXBuffer, 0, forceX);
+          this.device.queue.writeBuffer(this.forceMapYBuffer, 0, forceY);
+          this.frameCount = 0;
+        }
+
+        async animate() {
+          if (this.frameCount++ > 100) {
+            this.changeForces();
+          }
+          stats.update();
+
+          this.smoothedMouseX += (this.mouseX - this.smoothedMouseX) * 0.1;
+          this.smoothedMouseY += (this.mouseY - this.smoothedMouseY) * 0.1;
+
+          const uniformData = new Float32Array(6);
+          uniformData.set([this.width, this.height], 0);
+          uniformData.set([this.smoothedMouseX, this.smoothedMouseY], 2);
+          uniformData.set([this.forceMapWidth, this.forceMapHeight], 4);
+          this.device.queue.writeBuffer(this.uniformsBuffer, 0, uniformData);
+
+          const commandEncoder = this.device.createCommandEncoder();
+          const computePass = commandEncoder.beginComputePass();
+          computePass.setPipeline(this.computePipeline);
+          computePass.setBindGroup(0, this.computeBindGroup);
+
+          const workgroupSize = 64;
+          const numWorkgroups = Math.ceil(this.numParticles / workgroupSize);
+          const maxWorkgroupsPerDim =
+            this.device.limits.maxComputeWorkgroupsPerDimension;
+
+          if (numWorkgroups > maxWorkgroupsPerDim) {
+            const dispatchX = maxWorkgroupsPerDim;
+            const dispatchY = Math.ceil(numWorkgroups / maxWorkgroupsPerDim);
+            computePass.dispatchWorkgroups(dispatchX, dispatchY);
+          } else {
+            computePass.dispatchWorkgroups(numWorkgroups);
+          }
+          computePass.end();
+
+          const currentParticlesBuffer = this.particlesBuffer;
+          const currentReadbackBuffer = this.readbackBuffer;
+
+          commandEncoder.copyBufferToBuffer(
+            currentParticlesBuffer,
+            0,
+            currentReadbackBuffer,
+            0,
+            currentParticlesBuffer.size
+          );
+
+          this.device.queue.submit([commandEncoder.finish()]);
+
+          await currentReadbackBuffer.mapAsync(GPUMapMode.READ);
+          const particleData = new Float32Array(
+            currentReadbackBuffer.getMappedRange()
+          );
+
+          this.context.fillStyle = "rgba(0, 0, 0, 0.1)";
+          this.context.fillRect(0, 0, this.width, this.height);
+
+          this.context.fillStyle = "#FFFFFF";
+          const floatsPerParticle = 6;
+          const numParticlesInFrame = particleData.length / floatsPerParticle;
+          for (let i = 0; i < numParticlesInFrame; i++) {
+            const offset = i * floatsPerParticle;
+            const x = particleData[offset];
+            const y = particleData[offset + 1];
+            this.context.fillRect(x, y, 1, 1);
+          }
+
+          currentReadbackBuffer.unmap();
+
+          requestAnimationFrame(() => this.animate());
+        }
+      }
+
+      window.addEventListener("load", async () => {
+        stats = new Stats();
+        document.body.appendChild(stats.dom);
+
+        const canvas = document.getElementById("canvas-2d");
+
+        const config = {
+          particleCount: 10_000,
+        };
+
+        const particleSystem = new ParticleSystemGpuComputeCanvas2d(
+          canvas,
+          config.particleCount
+        );
+        await particleSystem.init();
+
+        const gui = new GUI();
+        gui
+          .add(config, "particleCount", 10_000, 200_000, 5_000)
+          .name("Particle Count")
+          .onFinishChange(async (count) => {
+            await particleSystem.reset(count);
+          });
+      });
+    </script>
+  </body>
+</html>

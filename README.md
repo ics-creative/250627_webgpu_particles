@@ -4,6 +4,7 @@
 
 - [WebGPU 版](https://ics-creative.github.io/250627_webgpu_particles/webgpu.html)
 - [Canvas 版](https://ics-creative.github.io/250627_webgpu_particles/canvas.html)
+- [WebGPUのコンピュートシェーダー + Canvas描画版](https://ics-creative.github.io/250627_webgpu_particles/webgpu-compute-to-canvas2d.html)
 
 ## 参考数値
 
