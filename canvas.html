@@ -342,14 +342,14 @@
         const canvas = document.getElementById("canvas");
 
         const config = {
-          particleCount: 50000,
+          particleCount: 50_000,
         };
 
         const particleSystem = new ParticleSystem(canvas, config.particleCount);
 
         const gui = new GUI();
         gui
-          .add(config, "particleCount", 1000, 200000, 1000)
+          .add(config, "particleCount", 10_000, 200_000, 10_000)
           .name("Particle Count")
           .onFinishChange((count) => {
             particleSystem.reset(count);

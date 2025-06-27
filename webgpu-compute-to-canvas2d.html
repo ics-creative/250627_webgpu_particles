@@ -390,7 +390,7 @@
         const canvas = document.getElementById("canvas-2d");
 
         const config = {
-          particleCount: 10_000,
+          particleCount: 50_000,
         };
 
         const particleSystem = new ParticleSystemGpuComputeCanvas2d(
@@ -401,7 +401,7 @@
 
         const gui = new GUI();
         gui
-          .add(config, "particleCount", 10_000, 200_000, 5_000)
+          .add(config, "particleCount", 10_000, 200_000, 10_000)
           .name("Particle Count")
           .onFinishChange(async (count) => {
             await particleSystem.reset(count);
