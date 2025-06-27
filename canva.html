@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Particles Canvas 2D</title>
+    <script type="importmap">
+      {
+        "imports": {
+          "stats.js": "https://esm.sh/stats.js",
+          "lil-gui": "https://esm.sh/lil-gui",
+          "simplex-noise": "https://esm.sh/simplex-noise"
+        }
+      }
+    </script>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background-color: #000;
+      }
+      canvas {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+    <script type="module">
+      import Stats from "stats.js";
+      import { GUI } from "lil-gui";
+      import { createNoise2D } from "simplex-noise";
+
+      let stats;
+
+      /**
+       * パーティクルクラス
+       * 元のActionScriptのParticleクラスに相当します。
+       */
+      class Particle {
+        /** @type {number} */
+        x;
+        /** @type {number} */
+        y;
+        /** @type {number} */
+        vx;
+        /** @type {number} */
+        vy;
+        /** @type {number} */
+        rnd;
+        /** @type {number} */
+        r;
+        /** @type {number} */
+        g;
+        /** @type {number} */
+        b;
+
+        /**
+         * @param {number} width
+         * @param {number} height
+         */
+        constructor(width, height) {
+          this.x = Math.random() * width;
+          this.y = Math.random() * height;
+          this.vx = 0;
+          this.vy = 0;
+          // 力の揺らぎを再現するためのランダム値
+          this.rnd = (Math.random() * 0.2 + 0.9) * 0.003;
+
+          // パーティクルの色を白に設定
+          this.r = 255;
+          this.g = 255;
+          this.b = 255;
+        }
+      }
+
+      /**
+       * Simplex Noise(パーリンノイズの改良版)を生成するクラス
+       * こちらはオープンソースの実装をES6 Class構文にリファクタリングしたものです。
+       * Copyright (C) 2011 by Johannes Baagoe <baagoe@baagoe.com>
+       */
+      // class SimplexNoise { ... } is now in simplex-noise.js
+
+      /**
+       * パーティクルシステム全体を管理するクラス
+       * 元のActionScriptのTestMainクラスに相当します。
+       */
+      class ParticleSystem {
+        /** @type {HTMLCanvasElement} */
+        canvas;
+        /** @type {CanvasRenderingContext2D} */
+        context;
+        /** @type {number} */
+        numParticles;
+        /** @type {Particle[]} */
+        particles = [];
+        /** @type {Float32Array | null} */
+        forceXVector = null;
+        /** @type {Float32Array | null} */
+        forceYVector = null;
+        /** @type {number} */
+        width = 0;
+        /** @type {number} */
+        height = 0;
+        /** @type {number} */
+        forceMapWidth = 0;
+        /** @type {number} */
+        forceMapHeight = 0;
+        /** @type {number} */
+        devicePixelRatio = 1;
+        /** @type {number} */
+        frameCount = 0;
+        /** @type {Function | null} */
+        noiseX = null;
+        /** @type {Function | null} */
+        noiseY = null;
+        /** @type {number} */
+        noiseSeed = Math.random();
+        /** @type {number} */
+        mouseX = 0;
+        /** @type {number} */
+        mouseY = 0;
+        /** @type {number} */
+        smoothedMouseX = 0;
+        /** @type {number} */
+        smoothedMouseY = 0;
+
+        /**
+         * @param {HTMLCanvasElement} canvas
+         * @param {number} numParticles
+         */
+        constructor(canvas, numParticles) {
+          this.canvas = canvas;
+          this.context = canvas.getContext("2d", {
+            willReadFrequently: true,
+          });
+          this.numParticles = numParticles;
+
+          this.init();
+        }
+
+        /**
+         * @param {number} newNumParticles
+         */
+        reset(newNumParticles) {
+          this.numParticles = newNumParticles;
+          this.particles = [];
+          for (let i = 0; i < this.numParticles; i++) {
+            this.particles.push(new Particle(this.width, this.height));
+          }
+        }
+
+        /**
+         * 初期化処理
+         */
+        init() {
+          // 初期サイズ設定とリサイズイベントの登録
+          this.handleResize();
+          window.addEventListener("resize", () => this.handleResize());
+          // クリックイベントの登録
+          this.canvas.addEventListener("click", () => this.changeForces());
+          // マウス移動イベントの登録
+          this.canvas.addEventListener("mousemove", (event) => {
+            this.mouseX = event.clientX * this.devicePixelRatio;
+            this.mouseY = event.clientY * this.devicePixelRatio;
+          });
+
+          // パーティクルの生成
+          this.particles = [];
+          for (let i = 0; i < this.numParticles; i++) {
+            this.particles.push(new Particle(this.width, this.height));
+          }
+
+          // 初期フォースマップの生成
+          this.changeForces();
+          // アニメーションループの開始
+          this.animate();
+        }
+
+        /**
+         * ウィンドウリサイズ時の処理
+         */
+        handleResize() {
+          this.devicePixelRatio = window.devicePixelRatio || 1;
+          const cssWidth = window.innerWidth;
+          const cssHeight = window.innerHeight;
+
+          this.canvas.width = cssWidth * this.devicePixelRatio;
+          this.canvas.height = cssHeight * this.devicePixelRatio;
+
+          this.canvas.style.width = cssWidth + "px";
+          this.canvas.style.height = cssHeight + "px";
+
+          // ParticleSystem内の計算で使うwidth/heightを高解像度のものに更新
+          this.width = this.canvas.width;
+          this.height = this.canvas.height;
+
+          // フォースマップの解像度を画面の1/4に設定
+          this.forceMapWidth = Math.floor(this.width / 4);
+          this.forceMapHeight = Math.floor(this.height / 4);
+
+          // リサイズ時にフォースマップを再計算
+          this.changeForces();
+        }
+
+        /**
+         * パーティクルを動かす力場（フォースマップ）を再生成
+         */
+        changeForces() {
+          this.noiseSeed = Math.random();
+          const createRandom = () => (this.noiseSeed += 0.0001); // 擬似乱数ジェネレータ
+          this.noiseX = createNoise2D(createRandom);
+          this.noiseY = createNoise2D(createRandom);
+
+          const forceMapSize = this.forceMapWidth * this.forceMapHeight;
+          this.forceXVector = new Float32Array(forceMapSize);
+          this.forceYVector = new Float32Array(forceMapSize);
+
+          // ノイズのスケール（拡大率）を画面DPRを考慮して動的に計算します。
+          // これにより、どのような解像度でも見た目の渦の大きさがほぼ一定になります。
+          const visualPeriod = 2000; // 見た目上の渦の周期（ピクセル単位）。この値を変更すると渦の大きさが変わります。
+          const scale = 4 / (this.devicePixelRatio * visualPeriod);
+
+          for (let y = 0; y < this.forceMapHeight; y++) {
+            for (let x = 0; x < this.forceMapWidth; x++) {
+              const i = y * this.forceMapWidth + x;
+
+              // 2つの異なるノイズを生成し、-128から128の範囲にマッピング
+              if (this.noiseX && this.noiseY) {
+                this.forceXVector[i] = this.noiseX(x * scale, y * scale) * 128;
+                this.forceYVector[i] = this.noiseY(x * scale, y * scale) * 128;
+              }
+            }
+          }
+          this.frameCount = 0;
+        }
+
+        /**
+         * アニメーションループ
+         */
+        animate() {
+          stats.update();
+
+          // Smooth mouse position
+          this.smoothedMouseX += (this.mouseX - this.smoothedMouseX) * 0.1;
+          this.smoothedMouseY += (this.mouseY - this.smoothedMouseY) * 0.1;
+
+          // 100フレームごとにフォースマップを自動更新
+          this.frameCount++;
+          if (this.frameCount > 100) {
+            this.changeForces();
+          }
+
+          const imageData = this.context.getImageData(
+            0,
+            0,
+            this.width,
+            this.height
+          );
+          const pixels = imageData.data;
+
+          // フェードアウト効果（軌跡）
+          // 元のColorTransform(r-20, g-20, b-20)を再現
+          for (let i = 0; i < pixels.length; i += 4) {
+            pixels[i] = Math.max(0, pixels[i] - 20);
+            pixels[i + 1] = Math.max(0, pixels[i + 1] - 20);
+            pixels[i + 2] = Math.max(0, pixels[i + 2] - 20);
+          }
+
+          // パーティクルの更新と描画
+          for (const particle of this.particles) {
+            // パーティクルが画面内にある場合のみ力を適用
+            if (
+              particle.x >= 0 &&
+              particle.x < this.width &&
+              particle.y >= 0 &&
+              particle.y < this.height &&
+              this.forceXVector &&
+              this.forceYVector
+            ) {
+              const x_int = particle.x | 0;
+              const y_int = particle.y | 0;
+              const forceIndex =
+                Math.floor(y_int / 4) * this.forceMapWidth +
+                Math.floor(x_int / 4);
+
+              if (this.forceXVector[forceIndex]) {
+                particle.vx =
+                  particle.vx * 0.99 +
+                  this.forceXVector[forceIndex] * particle.rnd;
+                particle.vy =
+                  particle.vy * 0.99 +
+                  this.forceYVector[forceIndex] * particle.rnd;
+              }
+            }
+
+            // マウスからの斥力
+            const dx = particle.x - this.smoothedMouseX;
+            const dy = particle.y - this.smoothedMouseY;
+            const distSq = dx * dx + dy * dy;
+            const mouseRadiusSq = 300 ** 2; // マウスの影響範囲（半径の2乗）
+
+            if (distSq < mouseRadiusSq) {
+              const dist = Math.sqrt(distSq);
+              const force = (1 - dist / 150) * 3; // マウスからの力の強さ
+              particle.vx += (dx / dist) * force;
+              particle.vy += (dy / dist) * force;
+            }
+
+            particle.x += particle.vx;
+            particle.y += particle.vy;
+
+            // 画面外に出たパーティクルは反対側から現れる（ラップアラウンド）
+            if (particle.x < 0) particle.x += this.width;
+            else if (particle.x >= this.width) particle.x -= this.width;
+            if (particle.y < 0) particle.y += this.height;
+            else if (particle.y >= this.height) particle.y -= this.height;
+
+            // ピクセルを描画
+            const x = particle.x | 0;
+            const y = particle.y | 0;
+            if (x >= 0 && x < this.width && y >= 0 && y < this.height) {
+              const pixelIndex = (x + y * this.width) * 4;
+              pixels[pixelIndex] = particle.r;
+              pixels[pixelIndex + 1] = particle.g;
+              pixels[pixelIndex + 2] = particle.b;
+              pixels[pixelIndex + 3] = 255; // Alpha
+            }
+          }
+
+          this.context.putImageData(imageData, 0, 0);
+
+          requestAnimationFrame(() => this.animate());
+        }
+      }
+
+      // エントリーポイント
+      window.addEventListener("load", () => {
+        stats = new Stats();
+        document.body.appendChild(stats.dom);
+
+        const canvas = document.getElementById("canvas");
+
+        const config = {
+          particleCount: 50000,
+        };
+
+        const particleSystem = new ParticleSystem(canvas, config.particleCount);
+
+        const gui = new GUI();
+        gui
+          .add(config, "particleCount", 1000, 200000, 1000)
+          .name("Particle Count")
+          .onFinishChange((count) => {
+            particleSystem.reset(count);
+          });
+      });
+    </script>
+  </body>
+</html>
