@@ -21,6 +21,7 @@
       }
       canvas {
         display: block;
+        touch-action: none;
       }
     </style>
   </head>
@@ -212,7 +213,8 @@
         setupEventListeners() {
           window.addEventListener("resize", () => this.handleResize());
           this.canvas.addEventListener("click", () => this.changeForces());
-          this.canvas.addEventListener("mousemove", (event) => {
+
+          this.canvas.addEventListener("pointermove", (event) => {
             this.mouseX = event.clientX * this.devicePixelRatio;
             this.mouseY = event.clientY * this.devicePixelRatio;
           });
@@ -522,11 +524,20 @@
         await particleSystem.init();
 
         const gui = new GUI();
+        const K = 1_000;
+        config.particleCountK = Math.round(config.particleCount / K);
         gui
-          .add(config, "particleCount", 10_000, 5_000_000, 10_000)
-          .name("Particle Count")
-          .onFinishChange(async (count) => {
-            await particleSystem.reset(count);
+          .add(config, "particleCountK")
+          .min(100)
+          .max(5_000)
+          .step(100)
+          .name("Particle Count (K)")
+          .listen()
+          .onChange((k) => {
+            config.particleCount = Math.round(k) * K;
+          })
+          .onFinishChange(async (k) => {
+            await particleSystem.reset(Math.round(k) * K);
           });
       });
     </script>
